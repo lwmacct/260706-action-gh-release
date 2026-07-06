@@ -1,0 +1,56 @@
+name: "Install GitHub Release Binary"
+description: "Download, verify, extract, cache, and add a GitHub release binary to PATH"
+author: "lwmacct"
+inputs:
+  repository:
+    description: "GitHub repository that publishes the release asset, in owner/repo format."
+    required: true
+  tag:
+    description: "Release tag to install. Use latest for the latest stable release or latest-prerelease for the latest prerelease."
+    default: latest
+    required: false
+  github-token:
+    description: "GitHub token used to read release metadata and download release assets."
+    default: ${{ github.token }}
+    required: false
+  asset:
+    description: "Glob pattern used to select the GitHub release asset. When omitted, the current runner OS and architecture are matched automatically."
+    required: false
+  binary:
+    description: "Glob pattern used to select installed binaries. For archives, this matches one or more files inside the extracted asset."
+    required: false
+  checksum:
+    description: "Optional expected SHA256 checksum of the downloaded release asset. Accepts either sha256:<hex> or a bare hex digest."
+    required: false
+  cache:
+    description: "Set to true to cache installations for fixed release tags. Uses checksum when provided, otherwise GitHub asset metadata."
+    default: "false"
+    required: false
+  rename:
+    description: "Rename the installed binary. Only supported when exactly one binary is installed."
+    required: false
+outputs:
+  release-tag:
+    description: "Resolved release tag."
+  asset-name:
+    description: "Selected release asset name."
+  install-dir:
+    description: "Directory where the asset was installed."
+  bin-dir:
+    description: "First directory added to PATH."
+  binary-path:
+    description: "First installed binary path."
+  bin-dirs:
+    description: "JSON array of directories added to PATH."
+  binary-paths:
+    description: "JSON array of installed binary paths."
+  checksum:
+    description: "SHA256 checksum of the downloaded release asset."
+  cache-hit:
+    description: "Whether the installation was restored from cache."
+branding:
+  icon: "archive"
+  color: "green"
+runs:
+  using: "node24"
+  main: "dist/index.js"

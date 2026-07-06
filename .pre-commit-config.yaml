@@ -1,0 +1,15 @@
+# Pre-commit hooks configuration
+# See https://pre-commit.com for more information
+
+# 全局配置
+default_stages: [pre-commit]
+fail_fast: true # 发现第一个错误即停止
+
+repos:
+  - repo: local
+    hooks:
+      - id: pnpm-build
+        name: pnpm build
+        entry: pnpm build
+        language: system
+        pass_filenames: false

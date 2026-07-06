@@ -1,0 +1,70 @@
+name: Test etcd Multi Binary
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/test-etcd.yml"
+      - "action.yml"
+      - "dist/**"
+  pull_request:
+    paths:
+      - ".github/workflows/test-etcd.yml"
+      - "action.yml"
+      - "dist/**"
+
+permissions:
+  contents: read
+
+env:
+  ETCD_TAG: v3.6.13
+  ETCD_VERSION: 3.6.13
+
+jobs:
+  install-etcd:
+    name: Install etcd-io/etcd multi binary archive
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Verify etcd binaries are not preinstalled
+        run: |
+          set -euo pipefail
+          ! command -v etcd
+          ! command -v etcdctl
+          ! command -v etcdutl
+
+      - name: Install etcd release binaries
+        id: install
+        uses: ./
+        with:
+          repository: etcd-io/etcd
+          tag: ${{ env.ETCD_TAG }}
+          asset: etcd-${{ env.ETCD_TAG }}-linux-amd64.tar.gz
+          cache: "true"
+
+      - name: Verify multiple binaries are on PATH
+        env:
+          BIN_DIRS: ${{ steps.install.outputs.bin-dirs }}
+          BINARY_PATHS: ${{ steps.install.outputs.binary-paths }}
+        run: |
+          set -euo pipefail
+
+          jq -e 'length == 1' <<<"${BIN_DIRS}"
+          jq -e 'length == 3' <<<"${BINARY_PATHS}"
+          jq -e 'any(endswith("/etcd"))' <<<"${BINARY_PATHS}"
+          jq -e 'any(endswith("/etcdctl"))' <<<"${BINARY_PATHS}"
+          jq -e 'any(endswith("/etcdutl"))' <<<"${BINARY_PATHS}"
+
+          _bin_dir="$(jq -r '.[0]' <<<"${BIN_DIRS}")"
+          test "$(command -v etcd)" = "${_bin_dir}/etcd"
+          test "$(command -v etcdctl)" = "${_bin_dir}/etcdctl"
+          test "$(command -v etcdutl)" = "${_bin_dir}/etcdutl"
+
+          etcd --version | grep -F "${ETCD_VERSION}"
+          etcdctl version | grep -F "${ETCD_VERSION}"
+          etcdutl version | grep -F "${ETCD_VERSION}"

@@ -1,0 +1,47 @@
+name: Test UPX
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/test-upx.yml"
+      - "action.yml"
+      - "dist/**"
+  pull_request:
+    paths:
+      - ".github/workflows/test-upx.yml"
+      - "action.yml"
+      - "dist/**"
+
+permissions:
+  contents: read
+
+env:
+  UPX_TAG: v5.2.0
+  UPX_VERSION: 5.2.0
+
+jobs:
+  install-upx:
+    name: Install upx/upx
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install UPX from GitHub release
+        uses: ./
+        with:
+          repository: upx/upx
+          tag: ${{ env.UPX_TAG }}
+          binary: upx
+          cache: "true"
+
+      - name: Verify UPX is on PATH
+        run: |
+          set -euo pipefail
+          command -v upx
+          upx --version
+          upx --version | grep -F "${UPX_VERSION}"
