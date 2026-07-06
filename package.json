@@ -1,6 +1,6 @@
 {
   "name": "@lwmacct/260706-action-gh-release",
-  "version": "0.8.260707",
+  "version": "0.9.260707",
   "description": "Download, verify, extract, cache, and add a GitHub release binary to PATH",
   "main": "dist/index.js",
   "exports": "./dist/index.js",
