@@ -19,8 +19,9 @@ const CHUNK_RULES = [
   ["azure-core", { prefixes: ["@azure/"] }],
   ["protobuf-runtime", { prefixes: ["@protobuf-ts/"] }],
   ["semver", { packages: ["semver"] }],
-  ["undici", { packages: ["undici"] }],
 ];
+
+const UNDICI_STUB_ID = "\0undici-proxy-agent-stub";
 
 function manualChunks(id) {
   const packageName = packageNameFromId(id);
@@ -85,6 +86,31 @@ function protobufRuntimeAlias() {
   };
 }
 
+function undiciProxyAgentStub() {
+  return {
+    name: "undici-proxy-agent-stub",
+    resolveId(source) {
+      if (source === "undici") {
+        return UNDICI_STUB_ID;
+      }
+      return null;
+    },
+    load(id) {
+      if (id !== UNDICI_STUB_ID) {
+        return null;
+      }
+
+      return `
+export class ProxyAgent {
+  constructor() {
+    throw new Error("Undici ProxyAgent is not bundled by this action");
+  }
+}
+`;
+    },
+  };
+}
+
 function minifyDependencyChunks() {
   return {
     name: "minify-dependency-chunks",
@@ -131,6 +157,7 @@ export default {
     },
   },
   plugins: [
+    undiciProxyAgentStub(),
     protobufRuntimeAlias(),
     nodeResolve({
       exportConditions: ["node", "import", "default"],

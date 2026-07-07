@@ -244,7 +244,7 @@ async function run() {
 async function loadActionsToolkit() {
     const [protobufRuntime, supportsColor] = await Promise.all([
         import('./chunks/protobuf-runtime.js').then(function (n) { return n.i; }),
-        import('./chunks/vendor.js').then(function (n) { return n.C; }),
+        import('./chunks/vendor.js').then(function (n) { return n.A; }),
     ]);
     requireMap.set("@protobuf-ts/runtime", protobufRuntime);
     requireMap.set("supports-color", supportsColor.default);
