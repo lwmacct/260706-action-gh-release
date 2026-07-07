@@ -132,6 +132,9 @@ function isSupplementalAsset(assetName) {
 function matchesGlob(value, pattern) {
     return globToRegExp(pattern).test(value);
 }
+function containsGlobPattern(value) {
+    return value.includes("*") || value.includes("?");
+}
 function normalizePath(value) {
     return value.replace(/\\/g, "/").split(path.sep).join("/");
 }
@@ -191,8 +194,8 @@ async function run() {
     try {
         await loadActionsToolkit();
         const inputs = getInputs();
-        const release = await getRelease(inputs);
-        const asset = selectAsset(release.assets, inputs);
+        const resolved = await resolveAsset(inputs);
+        const asset = resolved.asset;
         const cacheKey = getCacheKey(inputs, asset);
         const installRoot = getInstallRoot(inputs, asset);
         core.info(`Install directory: ${installRoot}`);
@@ -219,11 +222,12 @@ async function run() {
         }
         const installResult = await installAsset(downloadedAsset, asset.name, installRoot, inputs);
         const metadata = {
-            releaseTag: release.tag_name,
+            releaseTag: resolved.releaseTag,
             assetId: asset.id,
             assetName: asset.name,
             assetSize: asset.size,
             assetUpdatedAt: asset.updated_at,
+            assetSource: asset.source,
             installDir: installResult.installDir,
             assetPath: installResult.assetPath,
             binDirs: installResult.binDirs,
@@ -271,8 +275,12 @@ function getInputs() {
     const tag = core.getInput("tag") || "latest";
     const checksum = normalizeChecksum(core.getInput("checksum"));
     const cacheEnabled = getBooleanInput("cache");
+    const resolveMode = normalizeResolveMode(core.getInput("resolve"));
     if (cacheEnabled && isMovingTag(tag)) {
         core.info(`Cache is disabled for moving tag ${tag}`);
+    }
+    if (resolveMode === "direct" && cacheEnabled && !checksum && !isMovingTag(tag)) {
+        core.warning("resolve=direct with cache=true and no checksum cannot detect same-name release asset replacements");
     }
     return {
         githubToken: core.getInput("github-token"),
@@ -283,8 +291,16 @@ function getInputs() {
         binaryPattern: core.getInput("binary"),
         checksum,
         cacheEnabled: cacheEnabled && !isMovingTag(tag),
+        resolveMode,
         rename: normalizeRename(core.getInput("rename")),
     };
+}
+function normalizeResolveMode(value) {
+    const mode = value.trim().toLowerCase() || "auto";
+    if (mode === "auto" || mode === "metadata" || mode === "direct") {
+        return mode;
+    }
+    throw new Error("resolve must be one of: auto, metadata, direct");
 }
 function getBooleanInput(name) {
     const value = core.getInput(name).toLowerCase();
@@ -316,6 +332,60 @@ async function getRelease(inputs) {
         }
     }
     return githubJson(inputs, `/repos/${inputs.owner}/${inputs.repo}/releases/tags/${encodeURIComponent(inputs.tag)}`);
+}
+async function resolveAsset(inputs) {
+    if (shouldResolveDirectly(inputs)) {
+        return resolveDirectAsset(inputs);
+    }
+    const release = await getRelease(inputs);
+    const releaseAsset = selectAsset(release.assets, inputs);
+    return {
+        releaseTag: release.tag_name,
+        asset: {
+            id: releaseAsset.id,
+            name: releaseAsset.name,
+            url: releaseAsset.url,
+            size: releaseAsset.size,
+            updated_at: releaseAsset.updated_at,
+            source: "metadata",
+        },
+    };
+}
+function shouldResolveDirectly(inputs) {
+    if (inputs.resolveMode === "metadata") {
+        return false;
+    }
+    if (inputs.resolveMode === "direct") {
+        return true;
+    }
+    return inputs.cacheEnabled && Boolean(inputs.checksum) && isExactAssetName(inputs.assetPattern);
+}
+function resolveDirectAsset(inputs) {
+    if (inputs.tag === "latest-prerelease") {
+        throw new Error("resolve=direct does not support latest-prerelease because GitHub has no direct prerelease download URL");
+    }
+    if (!isExactAssetName(inputs.assetPattern)) {
+        throw new Error("resolve=direct requires asset to be an exact file name without glob characters");
+    }
+    core.info("Resolving release asset directly without GitHub release metadata");
+    return {
+        releaseTag: inputs.tag,
+        asset: {
+            name: inputs.assetPattern,
+            url: githubReleaseDownloadUrl(inputs),
+            source: "direct",
+        },
+    };
+}
+function isExactAssetName(assetPattern) {
+    return Boolean(assetPattern) && !containsGlobPattern(assetPattern);
+}
+function githubReleaseDownloadUrl(inputs) {
+    const assetName = encodeURIComponent(inputs.assetPattern);
+    if (inputs.tag === "latest") {
+        return `https://github.com/${inputs.owner}/${inputs.repo}/releases/latest/download/${assetName}`;
+    }
+    return `https://github.com/${inputs.owner}/${inputs.repo}/releases/download/${encodeURIComponent(inputs.tag)}/${assetName}`;
 }
 async function githubJson(inputs, pathname) {
     const response = await githubFetch(inputs.githubToken, `${githubApiBaseUrl()}${pathname}`, {
@@ -529,15 +599,23 @@ function runnerPlatformKey() {
     return `${os.platform()}-${os.arch()}`;
 }
 function installFingerprint(inputs, asset) {
-    const fingerprintSource = JSON.stringify({
-        assetId: asset.id,
-        assetName: asset.name,
-        assetSize: asset.size,
-        assetUpdatedAt: asset.updated_at,
-        checksum: inputs.checksum,
-        binaryPattern: inputs.binaryPattern,
-        rename: inputs.rename,
-    });
+    const fingerprintSource = asset.source === "metadata"
+        ? JSON.stringify({
+            assetId: asset.id,
+            assetName: asset.name,
+            assetSize: asset.size,
+            assetUpdatedAt: asset.updated_at,
+            checksum: inputs.checksum,
+            binaryPattern: inputs.binaryPattern,
+            rename: inputs.rename,
+        })
+        : JSON.stringify({
+            source: asset.source,
+            assetName: asset.name,
+            checksum: inputs.checksum,
+            binaryPattern: inputs.binaryPattern,
+            rename: inputs.rename,
+        });
     return crypto.createHash("sha256").update(fingerprintSource).digest("hex").slice(0, 12);
 }
 async function saveCache(installRoot, cacheKey) {
@@ -574,6 +652,7 @@ function readInstallMetadata(installRoot, asset) {
         assetName: storedMetadata.assetName,
         assetSize: storedMetadata.assetSize,
         assetUpdatedAt: storedMetadata.assetUpdatedAt,
+        assetSource: storedMetadata.assetSource || "metadata",
         installDir: installRoot,
         assetPath: path.join(installRoot, storedMetadata.assetPath),
         binDirs: storedMetadata.binDirs.map((binDir) => path.join(installRoot, binDir)),
@@ -598,6 +677,7 @@ function writeInstallMetadata(installRoot, metadata) {
         assetName: metadata.assetName,
         assetSize: metadata.assetSize,
         assetUpdatedAt: metadata.assetUpdatedAt,
+        assetSource: metadata.assetSource,
         assetPath: relativeMetadataPath(installRoot, metadata.assetPath),
         binDirs: metadata.binDirs.map((binDir) => relativeMetadataPath(installRoot, binDir)),
         binaryPaths: metadata.binaryPaths.map((binaryPath) => relativeMetadataPath(installRoot, binaryPath)),
@@ -632,10 +712,13 @@ function materializeReleaseDownloadUrl(metadata, asset) {
     return pathToFileURL(downloadRoot).href;
 }
 function verifyCachedAssetMetadata(metadata, asset) {
-    if (metadata.assetId !== asset.id ||
-        metadata.assetName !== asset.name ||
-        metadata.assetSize !== asset.size ||
-        metadata.assetUpdatedAt !== asset.updated_at) {
+    if (metadata.assetName !== asset.name) {
+        throw new Error("Cached installation metadata does not match the selected GitHub release asset");
+    }
+    if (asset.source === "direct") {
+        return;
+    }
+    if (metadata.assetId !== asset.id || metadata.assetSize !== asset.size || metadata.assetUpdatedAt !== asset.updated_at) {
         throw new Error("Cached installation metadata does not match the selected GitHub release asset");
     }
 }

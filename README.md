@@ -13,6 +13,7 @@
 - 对 archive 自动解压，并将匹配到的 binary 所在目录加入 `PATH`
 - 支持 SHA256 校验
 - 支持固定 tag 缓存；未提供 checksum 时使用 GitHub asset metadata 作为缓存锚点
+- 支持 direct resolve 模式，在明确 asset 名称时可跳过 GitHub release metadata 请求
 - 输出安装路径、asset 名称、实际 SHA256 和 cache 命中状态
 - 缓存原始 release asset 和安装后的 binary
 - 输出本地 GitHub Release 下载根地址，方便其他工具复用缓存
@@ -108,10 +109,10 @@ steps:
 - `latest` 和 `latest-prerelease` 是移动 tag，不会缓存
 - 固定 tag 可以缓存
 - cache key 格式为 `gh-release/v1/<owner>/<repo>/<tag>/<platform>-<arch>/<fingerprint>`
-- cache fingerprint 包含 GitHub asset metadata：`asset.id`、`asset.name`、`asset.size`、`asset.updated_at`
-- 如果提供 `checksum`，cache fingerprint 也会包含 checksum
+- metadata resolve 模式下，cache fingerprint 包含 GitHub asset metadata：`asset.id`、`asset.name`、`asset.size`、`asset.updated_at`
+- direct resolve 模式下，cache fingerprint 使用明确的 asset 名称和 checksum 等输入；无 checksum 时无法感知上游同名 asset 被替换
 - cache 内容使用 `asset/`、`bin/`、`release/` 和 `metadata.json` 布局
-- cache hit 后会校验缓存 metadata 是否仍匹配当前选中的 release asset
+- metadata resolve 模式下，cache hit 后会校验缓存 metadata 是否仍匹配当前选中的 release asset
 
 ## SHA256 校验
 
@@ -133,6 +134,39 @@ checksum: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
 无论是否传入 `checksum`，Action 都会计算下载文件的实际 SHA256，并通过 output `checksum` 暴露。
+
+## Asset 解析模式
+
+`resolve` 控制如何定位 release asset：
+
+- `auto`：默认值。通常使用 GitHub Release API 读取 metadata；当 `cache: "true"`、固定 tag、明确 `asset` 名称并提供 `checksum` 时，走 direct 快路径以便 cache hit 时不请求 GitHub release metadata
+- `metadata`：强制使用 GitHub Release API。支持自动选择 asset、glob asset、`latest-prerelease` 和 metadata 锚定缓存
+- `direct`：不请求 GitHub release metadata，要求 `asset` 是明确文件名，不能包含 `*` 或 `?`
+
+direct 模式会构造下载地址：
+
+```text
+https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>
+```
+
+`tag: latest` 时使用：
+
+```text
+https://github.com/<owner>/<repo>/releases/latest/download/<asset>
+```
+
+`latest-prerelease` 没有等价 direct URL，因此不能使用 `resolve: direct`。direct 模式允许不传 `checksum`，但如果同时启用缓存，Action 会打印 warning，因为这种缓存只锚定 tag 和 asset 名称。
+
+```yaml
+- uses: lwmacct/260706-action-gh-release@main
+  with:
+    repository: appleboy/drone-ssh
+    tag: v1.8.2
+    asset: drone-ssh-1.8.2-linux-amd64
+    checksum: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    cache: "true"
+    resolve: direct
+```
 
 ## 重命名 binary
 
@@ -160,6 +194,7 @@ checksum: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 | `binary` | 否 |  | 用于选择最终安装 binary 的 glob。archive 场景下可匹配一个或多个解压后的文件 |
 | `checksum` | 否 |  | 可选 SHA256，支持 `sha256:<hex>` 或裸 hex |
 | `cache` | 否 | `false` | 设为 `true` 后对固定 tag 启用缓存 |
+| `resolve` | 否 | `auto` | Asset 解析模式：`auto`、`metadata` 或 `direct` |
 | `rename` | 否 |  | 重命名最终安装的单个 binary |
 
 ## Outputs
@@ -262,3 +297,4 @@ jobs:
 - archive 中有多个可执行文件时，如果不设置 `binary`，会全部安装并暴露到 `PATH`
 - `latest-prerelease` 会选择最新的非 draft prerelease
 - 私有仓库或更高 API rate limit 场景下，请传入有权限的 `github-token`
+- 私有仓库如无法通过 direct 下载地址访问 asset，请使用 `resolve: metadata`

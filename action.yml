@@ -26,6 +26,10 @@ inputs:
     description: "Set to true to cache installations for fixed release tags. Uses checksum when provided, otherwise GitHub asset metadata."
     default: "false"
     required: false
+  resolve:
+    description: "How to resolve release assets: auto, metadata, or direct. direct skips GitHub release metadata and requires an exact asset name."
+    default: auto
+    required: false
   rename:
     description: "Rename the installed binary. Only supported when exactly one binary is installed."
     required: false

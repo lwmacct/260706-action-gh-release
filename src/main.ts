@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import {
   architectureAliases,
   chmodExecutable,
+  containsGlobPattern,
   formatNames,
   hashFile,
   includesAny,
@@ -52,6 +53,8 @@ const ASSET_DIR = "asset";
 const BIN_DIR = "bin";
 const RELEASE_DIR = "release";
 
+type ResolveMode = "auto" | "metadata" | "direct";
+
 interface Inputs {
   githubToken: string;
   owner: string;
@@ -61,6 +64,7 @@ interface Inputs {
   binaryPattern: string;
   checksum: string;
   cacheEnabled: boolean;
+  resolveMode: ResolveMode;
   rename: string;
 }
 
@@ -82,12 +86,27 @@ interface ReleaseAsset {
   updated_at: string;
 }
 
+interface SelectedAsset {
+  name: string;
+  url: string;
+  source: "metadata" | "direct";
+  id?: number;
+  size?: number;
+  updated_at?: string;
+}
+
+interface ResolvedAsset {
+  releaseTag: string;
+  asset: SelectedAsset;
+}
+
 interface InstallMetadata {
   releaseTag: string;
-  assetId: number;
+  assetId: number | undefined;
   assetName: string;
-  assetSize: number;
-  assetUpdatedAt: string;
+  assetSize: number | undefined;
+  assetUpdatedAt: string | undefined;
+  assetSource: "metadata" | "direct";
   installDir: string;
   assetPath: string;
   binDirs: string[];
@@ -97,10 +116,11 @@ interface InstallMetadata {
 
 interface StoredInstallMetadata {
   releaseTag: string;
-  assetId: number;
+  assetId: number | undefined;
   assetName: string;
-  assetSize: number;
-  assetUpdatedAt: string;
+  assetSize: number | undefined;
+  assetUpdatedAt: string | undefined;
+  assetSource: "metadata" | "direct" | undefined;
   assetPath: string;
   binDirs: string[];
   binaryPaths: string[];
@@ -119,8 +139,8 @@ async function run(): Promise<void> {
     await loadActionsToolkit();
 
     const inputs = getInputs();
-    const release = await getRelease(inputs);
-    const asset = selectAsset(release.assets, inputs);
+    const resolved = await resolveAsset(inputs);
+    const asset = resolved.asset;
     const cacheKey = getCacheKey(inputs, asset);
     const installRoot = getInstallRoot(inputs, asset);
     core.info(`Install directory: ${installRoot}`);
@@ -151,11 +171,12 @@ async function run(): Promise<void> {
 
     const installResult = await installAsset(downloadedAsset, asset.name, installRoot, inputs);
     const metadata: InstallMetadata = {
-      releaseTag: release.tag_name,
+      releaseTag: resolved.releaseTag,
       assetId: asset.id,
       assetName: asset.name,
       assetSize: asset.size,
       assetUpdatedAt: asset.updated_at,
+      assetSource: asset.source,
       installDir: installResult.installDir,
       assetPath: installResult.assetPath,
       binDirs: installResult.binDirs,
@@ -207,8 +228,12 @@ function getInputs(): Inputs {
   const tag = core.getInput("tag") || "latest";
   const checksum = normalizeChecksum(core.getInput("checksum"));
   const cacheEnabled = getBooleanInput("cache");
+  const resolveMode = normalizeResolveMode(core.getInput("resolve"));
   if (cacheEnabled && isMovingTag(tag)) {
     core.info(`Cache is disabled for moving tag ${tag}`);
+  }
+  if (resolveMode === "direct" && cacheEnabled && !checksum && !isMovingTag(tag)) {
+    core.warning("resolve=direct with cache=true and no checksum cannot detect same-name release asset replacements");
   }
 
   return {
@@ -220,8 +245,17 @@ function getInputs(): Inputs {
     binaryPattern: core.getInput("binary"),
     checksum,
     cacheEnabled: cacheEnabled && !isMovingTag(tag),
+    resolveMode,
     rename: normalizeRename(core.getInput("rename")),
   };
+}
+
+function normalizeResolveMode(value: string): ResolveMode {
+  const mode = value.trim().toLowerCase() || "auto";
+  if (mode === "auto" || mode === "metadata" || mode === "direct") {
+    return mode;
+  }
+  throw new Error("resolve must be one of: auto, metadata, direct");
 }
 
 function getBooleanInput(name: string): boolean {
@@ -262,6 +296,67 @@ async function getRelease(inputs: Inputs): Promise<Release> {
   return githubJson<Release>(inputs, `/repos/${inputs.owner}/${inputs.repo}/releases/tags/${encodeURIComponent(inputs.tag)}`);
 }
 
+async function resolveAsset(inputs: Inputs): Promise<ResolvedAsset> {
+  if (shouldResolveDirectly(inputs)) {
+    return resolveDirectAsset(inputs);
+  }
+
+  const release = await getRelease(inputs);
+  const releaseAsset = selectAsset(release.assets, inputs);
+  return {
+    releaseTag: release.tag_name,
+    asset: {
+      id: releaseAsset.id,
+      name: releaseAsset.name,
+      url: releaseAsset.url,
+      size: releaseAsset.size,
+      updated_at: releaseAsset.updated_at,
+      source: "metadata",
+    },
+  };
+}
+
+function shouldResolveDirectly(inputs: Inputs): boolean {
+  if (inputs.resolveMode === "metadata") {
+    return false;
+  }
+  if (inputs.resolveMode === "direct") {
+    return true;
+  }
+  return inputs.cacheEnabled && Boolean(inputs.checksum) && isExactAssetName(inputs.assetPattern);
+}
+
+function resolveDirectAsset(inputs: Inputs): ResolvedAsset {
+  if (inputs.tag === "latest-prerelease") {
+    throw new Error("resolve=direct does not support latest-prerelease because GitHub has no direct prerelease download URL");
+  }
+  if (!isExactAssetName(inputs.assetPattern)) {
+    throw new Error("resolve=direct requires asset to be an exact file name without glob characters");
+  }
+
+  core.info("Resolving release asset directly without GitHub release metadata");
+  return {
+    releaseTag: inputs.tag,
+    asset: {
+      name: inputs.assetPattern,
+      url: githubReleaseDownloadUrl(inputs),
+      source: "direct",
+    },
+  };
+}
+
+function isExactAssetName(assetPattern: string): boolean {
+  return Boolean(assetPattern) && !containsGlobPattern(assetPattern);
+}
+
+function githubReleaseDownloadUrl(inputs: Inputs): string {
+  const assetName = encodeURIComponent(inputs.assetPattern);
+  if (inputs.tag === "latest") {
+    return `https://github.com/${inputs.owner}/${inputs.repo}/releases/latest/download/${assetName}`;
+  }
+  return `https://github.com/${inputs.owner}/${inputs.repo}/releases/download/${encodeURIComponent(inputs.tag)}/${assetName}`;
+}
+
 async function githubJson<T>(inputs: Inputs, pathname: string): Promise<T> {
   const response = await githubFetch(inputs.githubToken, `${githubApiBaseUrl()}${pathname}`, {
     accept: "application/vnd.github+json",
@@ -274,7 +369,7 @@ async function githubJson<T>(inputs: Inputs, pathname: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function downloadAsset(asset: ReleaseAsset, token: string): Promise<string> {
+async function downloadAsset(asset: SelectedAsset, token: string): Promise<string> {
   const response = await githubFetch(token, asset.url, {
     accept: "application/octet-stream",
   });
@@ -509,7 +604,7 @@ function matchesBinaryPattern(installRoot: string, filePath: string, pattern: st
   return matchesGlob(relativePath, normalizedPattern);
 }
 
-function getInstallRoot(inputs: Inputs, asset: ReleaseAsset): string {
+function getInstallRoot(inputs: Inputs, asset: SelectedAsset): string {
   const baseDir = process.env["RUNNER_TOOL_CACHE"] || process.env["RUNNER_TEMP"] || os.tmpdir();
   return path.join(
     baseDir,
@@ -522,7 +617,7 @@ function getInstallRoot(inputs: Inputs, asset: ReleaseAsset): string {
   );
 }
 
-function getCacheKey(inputs: Inputs, asset: ReleaseAsset): string | undefined {
+function getCacheKey(inputs: Inputs, asset: SelectedAsset): string | undefined {
   if (!inputs.cacheEnabled) {
     return undefined;
   }
@@ -542,16 +637,24 @@ function runnerPlatformKey(): string {
   return `${os.platform()}-${os.arch()}`;
 }
 
-function installFingerprint(inputs: Inputs, asset: ReleaseAsset): string {
-  const fingerprintSource = JSON.stringify({
-    assetId: asset.id,
-    assetName: asset.name,
-    assetSize: asset.size,
-    assetUpdatedAt: asset.updated_at,
-    checksum: inputs.checksum,
-    binaryPattern: inputs.binaryPattern,
-    rename: inputs.rename,
-  });
+function installFingerprint(inputs: Inputs, asset: SelectedAsset): string {
+  const fingerprintSource = asset.source === "metadata"
+    ? JSON.stringify({
+      assetId: asset.id,
+      assetName: asset.name,
+      assetSize: asset.size,
+      assetUpdatedAt: asset.updated_at,
+      checksum: inputs.checksum,
+      binaryPattern: inputs.binaryPattern,
+      rename: inputs.rename,
+    })
+    : JSON.stringify({
+      source: asset.source,
+      assetName: asset.name,
+      checksum: inputs.checksum,
+      binaryPattern: inputs.binaryPattern,
+      rename: inputs.rename,
+    });
   return crypto.createHash("sha256").update(fingerprintSource).digest("hex").slice(0, 12);
 }
 
@@ -572,7 +675,7 @@ async function saveCache(installRoot: string, cacheKey: string): Promise<void> {
   }
 }
 
-function readInstallMetadata(installRoot: string, asset: ReleaseAsset): InstallMetadata {
+function readInstallMetadata(installRoot: string, asset: SelectedAsset): InstallMetadata {
   const metadataPath = path.join(installRoot, INSTALL_METADATA_FILE);
   if (!fs.existsSync(metadataPath)) {
     throw new Error(`Cached installation is missing metadata: ${metadataPath}`);
@@ -592,6 +695,7 @@ function readInstallMetadata(installRoot: string, asset: ReleaseAsset): InstallM
     assetName: storedMetadata.assetName,
     assetSize: storedMetadata.assetSize,
     assetUpdatedAt: storedMetadata.assetUpdatedAt,
+    assetSource: storedMetadata.assetSource || "metadata",
     installDir: installRoot,
     assetPath: path.join(installRoot, storedMetadata.assetPath),
     binDirs: storedMetadata.binDirs.map((binDir) => path.join(installRoot, binDir)),
@@ -617,6 +721,7 @@ function writeInstallMetadata(installRoot: string, metadata: InstallMetadata): v
     assetName: metadata.assetName,
     assetSize: metadata.assetSize,
     assetUpdatedAt: metadata.assetUpdatedAt,
+    assetSource: metadata.assetSource,
     assetPath: relativeMetadataPath(installRoot, metadata.assetPath),
     binDirs: metadata.binDirs.map((binDir) => relativeMetadataPath(installRoot, binDir)),
     binaryPaths: metadata.binaryPaths.map((binaryPath) => relativeMetadataPath(installRoot, binaryPath)),
@@ -625,7 +730,7 @@ function writeInstallMetadata(installRoot: string, metadata: InstallMetadata): v
   fs.writeFileSync(path.join(installRoot, INSTALL_METADATA_FILE), `${JSON.stringify(storedMetadata, null, 2)}\n`);
 }
 
-function materializeReleaseDownloadUrl(metadata: InstallMetadata, asset: ReleaseAsset): string {
+function materializeReleaseDownloadUrl(metadata: InstallMetadata, asset: SelectedAsset): string {
   if (!metadata.assetPath) {
     return "";
   }
@@ -653,13 +758,14 @@ function materializeReleaseDownloadUrl(metadata: InstallMetadata, asset: Release
   return pathToFileURL(downloadRoot).href;
 }
 
-function verifyCachedAssetMetadata(metadata: InstallMetadata, asset: ReleaseAsset): void {
-  if (
-    metadata.assetId !== asset.id ||
-    metadata.assetName !== asset.name ||
-    metadata.assetSize !== asset.size ||
-    metadata.assetUpdatedAt !== asset.updated_at
-  ) {
+function verifyCachedAssetMetadata(metadata: InstallMetadata, asset: SelectedAsset): void {
+  if (metadata.assetName !== asset.name) {
+    throw new Error("Cached installation metadata does not match the selected GitHub release asset");
+  }
+  if (asset.source === "direct") {
+    return;
+  }
+  if (metadata.assetId !== asset.id || metadata.assetSize !== asset.size || metadata.assetUpdatedAt !== asset.updated_at) {
     throw new Error("Cached installation metadata does not match the selected GitHub release asset");
   }
 }

@@ -144,6 +144,10 @@ export function matchesGlob(value: string, pattern: string): boolean {
   return globToRegExp(pattern).test(value);
 }
 
+export function containsGlobPattern(value: string): boolean {
+  return value.includes("*") || value.includes("?");
+}
+
 export function normalizePath(value: string): string {
   return value.replace(/\\/g, "/").split(path.sep).join("/");
 }
