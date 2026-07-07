@@ -106,6 +106,29 @@ Undici ProxyAgent is not bundled by this action
 - 改用更完整的本地 shim。
 - 替换依赖，避免引入 `@actions/http-client` 的 dispatcher 路径。
 
+## 上游跟踪
+
+`github.com/actions/http-client` 已归档，`@actions/http-client` 的源码已迁移到 `actions/toolkit`：
+
+- [`actions/http-client`](https://github.com/actions/http-client)
+- [`actions/toolkit/packages/http-client`](https://github.com/actions/toolkit/tree/main/packages/http-client)
+
+这个包仍然通过 `@actions/core`、`@actions/cache` 和 `@actions/tool-cache` 被高版本 `@actions/*` 包使用。当前需要跟踪的是 `@actions/http-client` 顶层静态导入 `undici` 导致 Rollup 产物膨胀的问题，而不是旧仓库归档本身。
+
+相关上游 issue / PR：
+
+- [`actions/toolkit#1800`](https://github.com/actions/toolkit/pull/1800): lazy load `ProxyAgent`，避免打包完整 `undici`。
+- [`actions/toolkit#1697`](https://github.com/actions/toolkit/issues/1697): `undici` 导致不可 tree-shake 的体积增长。
+- [`actions/toolkit#1621`](https://github.com/actions/toolkit/issues/1621): `@actions/http-client` bundle size regression。
+- [`actions/toolkit#1893`](https://github.com/actions/toolkit/issues/1893): shrink package sizes。
+
+本项目已补充实测数据：
+
+- [`actions/toolkit#1800` comment](https://github.com/actions/toolkit/pull/1800#issuecomment-4899986926)
+- [`actions/toolkit#1697` comment](https://github.com/actions/toolkit/issues/1697#issuecomment-4899987088)
+- [`actions/toolkit#1621` comment](https://github.com/actions/toolkit/issues/1621#issuecomment-4899987242)
+- [`actions/toolkit#1893` comment](https://github.com/actions/toolkit/issues/1893#issuecomment-4899987377)
+
 ## 维护检查
 
 每次升级 `@actions/*` 相关依赖后，至少执行：
