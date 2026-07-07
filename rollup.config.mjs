@@ -31,6 +31,22 @@ function manualChunks(id) {
   return CHUNK_RULES.find(([, rule]) => matchesChunkRule(packageName, rule))?.[0] ?? "vendor";
 }
 
+function onLog(level, log, handler) {
+  if (isThirdPartyCircularDependency(log) || isThirdPartyThisRewrite(log)) {
+    return;
+  }
+
+  handler(level, log);
+}
+
+function isThirdPartyCircularDependency(log) {
+  return log.code === "CIRCULAR_DEPENDENCY" && log.ids?.every((id) => packageNameFromId(id));
+}
+
+function isThirdPartyThisRewrite(log) {
+  return log.code === "THIS_IS_UNDEFINED" && packageNameFromId(log.id ?? log.loc?.file ?? "");
+}
+
 function packageNameFromId(id) {
   const normalizedId = id.replace(/\\/g, "/");
   const nodeModulesIndex = normalizedId.lastIndexOf("/node_modules/");
@@ -103,6 +119,7 @@ function minifyDependencyChunks() {
 export default {
   input: "src/main.ts",
   external: (id) => NODE_BUILTINS.has(id),
+  onLog,
   output: {
     dir: "dist",
     format: "es",
