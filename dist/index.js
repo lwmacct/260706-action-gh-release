@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { pathToFileURL } from 'node:url';
 
 const TAR_EXTENSIONS = [".tar.gz", ".tar.xz", ".tar.bz2", ".tgz"];
 const WINDOWS_EXECUTABLE_PATTERN = /\.(?:exe|cmd|bat|ps1)$/i;
@@ -198,9 +199,10 @@ async function run() {
             const restoredKey = await cache.restoreCache([installRoot], cacheKey);
             if (restoredKey) {
                 const metadata = readInstallMetadata(installRoot, asset);
+                const releaseDownloadUrl = materializeReleaseDownloadUrl(metadata, asset);
                 core.info(`Restored ${restoredKey} from cache`);
                 addPaths(metadata.binDirs);
-                setOutputs(metadata, true);
+                setOutputs(metadata, true, releaseDownloadUrl);
                 return;
             }
         }
@@ -227,8 +229,9 @@ async function run() {
         if (inputs.cacheEnabled && cacheKey) {
             await saveCache(installRoot, cacheKey);
         }
+        const releaseDownloadUrl = materializeReleaseDownloadUrl(metadata, asset);
         addPaths(metadata.binDirs);
-        setOutputs(metadata, false);
+        setOutputs(metadata, false, releaseDownloadUrl);
         core.info(`Added ${formatNames(metadata.binDirs)} to PATH`);
     }
     catch (error) {
@@ -560,6 +563,36 @@ function writeInstallMetadata(installRoot, metadata) {
     };
     fs.writeFileSync(path.join(installRoot, INSTALL_METADATA_FILE), `${JSON.stringify(storedMetadata, null, 2)}\n`);
 }
+function materializeReleaseDownloadUrl(metadata, asset) {
+    if (isArchive(asset.name) || metadata.binaryPaths.length !== 1) {
+        return "";
+    }
+    const source = metadata.binaryPaths[0];
+    if (!source) {
+        return "";
+    }
+    const downloadRoot = path.join(metadata.installDir, ".release-download");
+    const target = path.join(downloadRoot, metadata.releaseTag, asset.name);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.rmSync(target, { force: true });
+    try {
+        fs.linkSync(source, target);
+        core.info(`Created release download layout with hardlink: ${target} -> ${source}`);
+    }
+    catch (hardlinkError) {
+        try {
+            fs.symlinkSync(source, target);
+            core.info(`Created release download layout with symlink: ${target} -> ${source}`);
+        }
+        catch (symlinkError) {
+            const hardlinkMessage = hardlinkError instanceof Error ? hardlinkError.message : String(hardlinkError);
+            const symlinkMessage = symlinkError instanceof Error ? symlinkError.message : String(symlinkError);
+            core.warning(`Could not create release download layout: hardlink failed: ${hardlinkMessage}; symlink failed: ${symlinkMessage}`);
+            return "";
+        }
+    }
+    return pathToFileURL(downloadRoot).href;
+}
 function verifyCachedAssetMetadata(metadata, asset) {
     if (metadata.assetId !== asset.id ||
         metadata.assetName !== asset.name ||
@@ -568,7 +601,7 @@ function verifyCachedAssetMetadata(metadata, asset) {
         throw new Error("Cached installation metadata does not match the selected GitHub release asset");
     }
 }
-function setOutputs(metadata, cacheHit) {
+function setOutputs(metadata, cacheHit, releaseDownloadUrl) {
     core.setOutput("release-tag", metadata.releaseTag);
     core.setOutput("asset-name", metadata.assetName);
     core.setOutput("install-dir", metadata.installDir);
@@ -578,6 +611,7 @@ function setOutputs(metadata, cacheHit) {
     core.setOutput("binary-paths", JSON.stringify(metadata.binaryPaths));
     core.setOutput("checksum", metadata.checksum);
     core.setOutput("cache-hit", cacheHit ? "true" : "false");
+    core.setOutput("release-download-url", releaseDownloadUrl);
 }
 function addPaths(binDirs) {
     for (const binDir of binDirs) {
