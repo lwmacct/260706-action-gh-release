@@ -12,8 +12,8 @@
 - 自动识别 `.zip`、`.tar.gz`、`.tar.xz`、`.tar.bz2`、`.tgz`
 - 对 archive 自动解压，并将匹配到的 binary 所在目录加入 `PATH`
 - 支持 SHA256 校验
-- 支持固定 tag 缓存；未提供 checksum 时使用 GitHub asset metadata 作为缓存锚点
-- 支持 direct resolve 模式，在明确 asset 名称时可跳过 GitHub release metadata 请求
+- 支持固定 tag 缓存；推荐用 checksum 锚定缓存，未提供 checksum 时使用 GitHub asset metadata
+- 默认 `auto` 模式可在明确 asset 名称并提供 checksum 时跳过 GitHub release metadata 请求
 - 输出安装路径、asset 名称、实际 SHA256 和 cache 命中状态
 - 缓存原始 release asset 和安装后的 binary
 - 输出本地 GitHub Release 下载根地址，方便其他工具复用缓存
@@ -109,6 +109,7 @@ steps:
 - `latest` 和 `latest-prerelease` 是移动 tag，不会缓存
 - 固定 tag 可以缓存
 - cache key 格式为 `gh-release/v1/<owner>/<repo>/<tag>/<platform>-<arch>/<fingerprint>`
+- 推荐对固定 tag 缓存同时提供 `asset` 和 `checksum`；默认 `resolve: auto` 会走 direct 快路径，cache hit 前不请求 GitHub release metadata
 - metadata resolve 模式下，cache fingerprint 包含 GitHub asset metadata：`asset.id`、`asset.name`、`asset.size`、`asset.updated_at`
 - direct resolve 模式下，cache fingerprint 使用明确的 asset 名称和 checksum 等输入；无 checksum 时无法感知上游同名 asset 被替换
 - cache 内容使用 `asset/`、`bin/`、`release/` 和 `metadata.json` 布局
@@ -137,13 +138,31 @@ checksum: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
 ## Asset 解析模式
 
-`resolve` 控制如何定位 release asset：
+`resolve` 控制如何定位 release asset。默认值是 `auto`，通常不需要显式设置。
 
-- `auto`：默认值。通常使用 GitHub Release API 读取 metadata；当 `cache: "true"`、固定 tag、明确 `asset` 名称并提供 `checksum` 时，走 direct 快路径以便 cache hit 时不请求 GitHub release metadata
+- `auto`：推荐默认值。需要自动选择 asset、glob asset 或 `latest-prerelease` 时使用 GitHub Release API；当 `cache: "true"`、固定 tag、明确 `asset` 名称并提供 `checksum` 时，走 direct 快路径
 - `metadata`：强制使用 GitHub Release API。支持自动选择 asset、glob asset、`latest-prerelease` 和 metadata 锚定缓存
 - `direct`：不请求 GitHub release metadata，要求 `asset` 是明确文件名，不能包含 `*` 或 `?`
 
-direct 模式会构造下载地址：
+推荐写法是保留默认 `auto`，同时提供 checksum：
+
+```yaml
+- uses: lwmacct/260706-action-gh-release@main
+  with:
+    repository: appleboy/drone-ssh
+    tag: v1.8.2
+    asset: drone-ssh-1.8.2-linux-amd64
+    checksum: sha256:1e10a9972eef167d9ddbc39e1ba80f7d44a011b4a6bc4f6149434154d9b6bb24
+    cache: "true"
+```
+
+这组参数会由 `auto` 自动走 direct 快路径。只有需要强制禁止 GitHub release metadata 请求时，才需要显式设置：
+
+```yaml
+resolve: direct
+```
+
+direct 路径会构造下载地址：
 
 ```text
 https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>
@@ -156,17 +175,6 @@ https://github.com/<owner>/<repo>/releases/latest/download/<asset>
 ```
 
 `latest-prerelease` 没有等价 direct URL，因此不能使用 `resolve: direct`。direct 模式允许不传 `checksum`，但如果同时启用缓存，Action 会打印 warning，因为这种缓存只锚定 tag 和 asset 名称。
-
-```yaml
-- uses: lwmacct/260706-action-gh-release@main
-  with:
-    repository: appleboy/drone-ssh
-    tag: v1.8.2
-    asset: drone-ssh-1.8.2-linux-amd64
-    checksum: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-    cache: "true"
-    resolve: direct
-```
 
 ## 重命名 binary
 
@@ -236,6 +244,7 @@ ${DRONE_SSH_RELEASE_URL}/v1.8.2/drone-ssh-1.8.2-linux-amd64
     repository: appleboy/drone-ssh
     tag: v1.8.2
     asset: drone-ssh-1.8.2-linux-amd64
+    checksum: sha256:1e10a9972eef167d9ddbc39e1ba80f7d44a011b4a6bc4f6149434154d9b6bb24
     cache: "true"
 
 - uses: appleboy/ssh-action@v1.2.5
@@ -282,7 +291,9 @@ jobs:
         with:
           repository: upx/upx
           tag: v5.2.0
+          asset: upx-5.2.0-amd64_linux.tar.xz
           binary: upx
+          checksum: sha256:3db5d3294707439db97866feab8d75d800f028f48481a40547411824da4288a1
           cache: "true"
 
       - run: |
