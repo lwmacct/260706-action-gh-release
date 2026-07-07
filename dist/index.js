@@ -148,9 +148,6 @@ function formatNames(names) {
 function unique(values) {
     return [...new Set(values)];
 }
-function sanitizePathSegment(value) {
-    return value.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "") || "asset";
-}
 function globToRegExp(pattern) {
     let source = "^";
     for (const character of pattern) {
@@ -183,10 +180,13 @@ Object.assign(globalThis, { require: compatRequire });
 let cache;
 let core;
 let tc;
-const ACTION_NAME = "install-github-release-binary";
-const CACHE_KEY_PREFIX = "ghrelbin";
-const CACHE_SCHEMA_VERSION = "v4";
-const INSTALL_METADATA_FILE = ".install-github-release-binary.json";
+const ACTION_NAME = "gh-release";
+const CACHE_KEY_PREFIX = "gh-release";
+const CACHE_SCHEMA_VERSION = "v1";
+const INSTALL_METADATA_FILE = "metadata.json";
+const ASSET_DIR = "asset";
+const BIN_DIR = "bin";
+const RELEASE_DIR = "release";
 async function run() {
     try {
         await loadActionsToolkit();
@@ -195,6 +195,10 @@ async function run() {
         const asset = selectAsset(release.assets, inputs);
         const cacheKey = getCacheKey(inputs, asset);
         const installRoot = getInstallRoot(inputs, asset);
+        core.info(`Install directory: ${installRoot}`);
+        if (cacheKey) {
+            core.info(`Cache key: ${cacheKey}`);
+        }
         if (inputs.cacheEnabled && cacheKey) {
             const restoredKey = await cache.restoreCache([installRoot], cacheKey);
             if (restoredKey) {
@@ -221,15 +225,16 @@ async function run() {
             assetSize: asset.size,
             assetUpdatedAt: asset.updated_at,
             installDir: installResult.installDir,
+            assetPath: installResult.assetPath,
             binDirs: installResult.binDirs,
             binaryPaths: installResult.binaryPaths,
             checksum: actualChecksum,
         };
         writeInstallMetadata(installRoot, metadata);
+        const releaseDownloadUrl = materializeReleaseDownloadUrl(metadata, asset);
         if (inputs.cacheEnabled && cacheKey) {
             await saveCache(installRoot, cacheKey);
         }
-        const releaseDownloadUrl = materializeReleaseDownloadUrl(metadata, asset);
         addPaths(metadata.binDirs);
         setOutputs(metadata, false, releaseDownloadUrl);
         core.info(`Added ${formatNames(metadata.binDirs)} to PATH`);
@@ -338,7 +343,7 @@ async function downloadAsset(asset, token) {
 async function githubFetch(token, url, headers) {
     const requestHeaders = {
         Accept: headers.accept,
-        "User-Agent": "install-github-release-binary-action",
+        "User-Agent": "gh-release-action",
         "X-GitHub-Api-Version": "2022-11-28",
     };
     if (token) {
@@ -393,11 +398,19 @@ function autoSelectAssetMatches(assets) {
     return [];
 }
 async function installAsset(assetPath, assetName, installRoot, inputs) {
+    fs.mkdirSync(installRoot, { recursive: true });
+    const installedAssetPath = path.join(installRoot, ASSET_DIR, assetName);
+    fs.mkdirSync(path.dirname(installedAssetPath), { recursive: true });
+    moveFile(assetPath, installedAssetPath);
+    core.info(`Stored release asset ${installedAssetPath}`);
     if (isArchive(assetName)) {
-        await extractArchive(assetPath, assetName, installRoot);
-        return installArchiveBinary(installRoot, inputs);
+        const extractRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gh-release-extract-"));
+        await extractArchive(installedAssetPath, assetName, extractRoot);
+        const archiveResult = installArchiveBinary(extractRoot, installRoot, installedAssetPath, inputs);
+        fs.rmSync(extractRoot, { force: true, recursive: true });
+        return archiveResult;
     }
-    return installSingleBinary(assetPath, assetName, installRoot, inputs);
+    return installSingleBinary(installedAssetPath, assetName, installRoot, inputs);
 }
 async function extractArchive(assetPath, assetName, destination) {
     fs.mkdirSync(destination, { recursive: true });
@@ -407,40 +420,59 @@ async function extractArchive(assetPath, assetName, destination) {
     }
     await tc.extractTar(assetPath, destination, tarFlags(assetName));
 }
-function installArchiveBinary(installRoot, inputs) {
-    const sources = selectInstalledBinaries(installRoot, inputs.binaryPattern);
+function installArchiveBinary(extractRoot, installRoot, assetPath, inputs) {
+    const sources = selectInstalledBinaries(extractRoot, inputs.binaryPattern);
     if (inputs.rename && sources.length !== 1) {
         throw new Error("rename is only supported when exactly one binary is installed");
     }
     const binaryPaths = sources.map((source) => {
-        const target = inputs.rename ? path.join(path.dirname(source), inputs.rename) : source;
-        if (path.resolve(source) !== path.resolve(target)) {
-            if (fs.existsSync(target)) {
-                throw new Error(`Cannot rename installed binary because target already exists: ${target}`);
-            }
-            fs.renameSync(source, target);
+        const relativeSource = normalizePath(path.relative(extractRoot, source));
+        const target = path.join(installRoot, BIN_DIR, inputs.rename || relativeSource);
+        if (fs.existsSync(target)) {
+            throw new Error(`Cannot install binary because target already exists: ${target}`);
         }
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        moveFile(source, target);
         chmodExecutable(target);
         core.info(`Installed ${target}`);
         return target;
     });
     return {
         installDir: installRoot,
+        assetPath,
         binDirs: unique(binaryPaths.map((binaryPath) => path.dirname(binaryPath))),
         binaryPaths,
     };
 }
 function installSingleBinary(assetPath, assetName, installRoot, inputs) {
-    fs.mkdirSync(installRoot, { recursive: true });
-    const target = path.join(installRoot, inputs.rename || path.basename(assetName));
-    moveFile(assetPath, target);
+    const target = path.join(installRoot, BIN_DIR, inputs.rename || path.basename(assetName));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const mode = linkOrCopy(assetPath, target);
     chmodExecutable(target);
-    core.info(`Installed ${target}`);
+    core.info(`Installed ${target} from asset using ${mode}`);
     return {
         installDir: installRoot,
-        binDirs: [installRoot],
+        assetPath,
+        binDirs: [path.dirname(target)],
         binaryPaths: [target],
     };
+}
+function linkOrCopy(source, target) {
+    fs.rmSync(target, { force: true });
+    try {
+        fs.linkSync(source, target);
+        return "hardlink";
+    }
+    catch {
+        try {
+            fs.symlinkSync(source, target);
+            return "symlink";
+        }
+        catch {
+            fs.copyFileSync(source, target);
+            return "copy";
+        }
+    }
 }
 function selectInstalledBinaries(installRoot, binaryPattern) {
     const files = listFiles(installRoot).filter((file) => path.basename(file) !== INSTALL_METADATA_FILE);
@@ -477,7 +509,7 @@ function matchesBinaryPattern(installRoot, filePath, pattern) {
 }
 function getInstallRoot(inputs, asset) {
     const baseDir = process.env["RUNNER_TOOL_CACHE"] || process.env["RUNNER_TEMP"] || os.tmpdir();
-    return path.join(baseDir, ACTION_NAME, inputs.owner, inputs.repo, inputs.tag, String(asset.id), sanitizePathSegment(asset.name), sanitizePathSegment(inputs.checksum || asset.updated_at));
+    return path.join(baseDir, ACTION_NAME, inputs.owner, inputs.repo, inputs.tag, runnerPlatformKey(), installFingerprint(inputs, asset));
 }
 function getCacheKey(inputs, asset) {
     if (!inputs.cacheEnabled) {
@@ -489,13 +521,16 @@ function getCacheKey(inputs, asset) {
         inputs.owner,
         inputs.repo,
         inputs.tag,
-        `${os.platform()}-${os.arch()}`,
-        String(asset.id),
-        cacheFingerprint(inputs, asset),
+        runnerPlatformKey(),
+        installFingerprint(inputs, asset),
     ].join("/");
 }
-function cacheFingerprint(inputs, asset) {
+function runnerPlatformKey() {
+    return `${os.platform()}-${os.arch()}`;
+}
+function installFingerprint(inputs, asset) {
     const fingerprintSource = JSON.stringify({
+        assetId: asset.id,
         assetName: asset.name,
         assetSize: asset.size,
         assetUpdatedAt: asset.updated_at,
@@ -528,7 +563,9 @@ function readInstallMetadata(installRoot, asset) {
         throw new Error(`Cached installation is missing metadata: ${metadataPath}`);
     }
     const storedMetadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
-    if (!Array.isArray(storedMetadata.binDirs) || !Array.isArray(storedMetadata.binaryPaths)) {
+    if (typeof storedMetadata.assetPath !== "string" ||
+        !Array.isArray(storedMetadata.binDirs) ||
+        !Array.isArray(storedMetadata.binaryPaths)) {
         throw new Error(`Cached installation metadata is incompatible with ${CACHE_SCHEMA_VERSION}: ${metadataPath}`);
     }
     const metadata = {
@@ -538,11 +575,15 @@ function readInstallMetadata(installRoot, asset) {
         assetSize: storedMetadata.assetSize,
         assetUpdatedAt: storedMetadata.assetUpdatedAt,
         installDir: installRoot,
+        assetPath: path.join(installRoot, storedMetadata.assetPath),
         binDirs: storedMetadata.binDirs.map((binDir) => path.join(installRoot, binDir)),
         binaryPaths: storedMetadata.binaryPaths.map((binaryPath) => path.join(installRoot, binaryPath)),
         checksum: storedMetadata.checksum,
     };
     verifyCachedAssetMetadata(metadata, asset);
+    if (!fs.existsSync(metadata.assetPath)) {
+        throw new Error(`Cached asset does not exist: ${metadata.assetPath}`);
+    }
     for (const binaryPath of metadata.binaryPaths) {
         if (!fs.existsSync(binaryPath)) {
             throw new Error(`Cached binary does not exist: ${binaryPath}`);
@@ -557,6 +598,7 @@ function writeInstallMetadata(installRoot, metadata) {
         assetName: metadata.assetName,
         assetSize: metadata.assetSize,
         assetUpdatedAt: metadata.assetUpdatedAt,
+        assetPath: relativeMetadataPath(installRoot, metadata.assetPath),
         binDirs: metadata.binDirs.map((binDir) => relativeMetadataPath(installRoot, binDir)),
         binaryPaths: metadata.binaryPaths.map((binaryPath) => relativeMetadataPath(installRoot, binaryPath)),
         checksum: metadata.checksum,
@@ -564,25 +606,21 @@ function writeInstallMetadata(installRoot, metadata) {
     fs.writeFileSync(path.join(installRoot, INSTALL_METADATA_FILE), `${JSON.stringify(storedMetadata, null, 2)}\n`);
 }
 function materializeReleaseDownloadUrl(metadata, asset) {
-    if (isArchive(asset.name) || metadata.binaryPaths.length !== 1) {
+    if (!metadata.assetPath) {
         return "";
     }
-    const source = metadata.binaryPaths[0];
-    if (!source) {
-        return "";
-    }
-    const downloadRoot = path.join(metadata.installDir, ".release-download");
+    const downloadRoot = path.join(metadata.installDir, RELEASE_DIR);
     const target = path.join(downloadRoot, metadata.releaseTag, asset.name);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.rmSync(target, { force: true });
     try {
-        fs.linkSync(source, target);
-        core.info(`Created release download layout with hardlink: ${target} -> ${source}`);
+        fs.linkSync(metadata.assetPath, target);
+        core.info(`Created release download layout with hardlink: ${target} -> ${metadata.assetPath}`);
     }
     catch (hardlinkError) {
         try {
-            fs.symlinkSync(source, target);
-            core.info(`Created release download layout with symlink: ${target} -> ${source}`);
+            fs.symlinkSync(metadata.assetPath, target);
+            core.info(`Created release download layout with symlink: ${target} -> ${metadata.assetPath}`);
         }
         catch (symlinkError) {
             const hardlinkMessage = hardlinkError instanceof Error ? hardlinkError.message : String(hardlinkError);
@@ -605,6 +643,7 @@ function setOutputs(metadata, cacheHit, releaseDownloadUrl) {
     core.setOutput("release-tag", metadata.releaseTag);
     core.setOutput("asset-name", metadata.assetName);
     core.setOutput("install-dir", metadata.installDir);
+    core.setOutput("asset-path", metadata.assetPath);
     core.setOutput("bin-dir", metadata.binDirs[0] || "");
     core.setOutput("binary-path", metadata.binaryPaths[0] || "");
     core.setOutput("bin-dirs", JSON.stringify(metadata.binDirs));

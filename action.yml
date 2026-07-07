@@ -36,6 +36,8 @@ outputs:
     description: "Selected release asset name."
   install-dir:
     description: "Directory where the asset was installed."
+  asset-path:
+    description: "Path to the cached original release asset."
   bin-dir:
     description: "First directory added to PATH."
   binary-path:
@@ -49,7 +51,7 @@ outputs:
   cache-hit:
     description: "Whether the installation was restored from cache."
   release-download-url:
-    description: "Local file URL root that mirrors GitHub release download layout for single-file assets."
+    description: "Local file URL root that mirrors GitHub release download layout."
 branding:
   icon: "archive"
   color: "green"

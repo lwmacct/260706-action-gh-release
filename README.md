@@ -14,7 +14,8 @@
 - 支持 SHA256 校验
 - 支持固定 tag 缓存；未提供 checksum 时使用 GitHub asset metadata 作为缓存锚点
 - 输出安装路径、asset 名称、实际 SHA256 和 cache 命中状态
-- 对裸二进制 asset 输出本地 GitHub Release 下载根地址，方便其他工具复用缓存
+- 缓存原始 release asset 和安装后的 binary
+- 输出本地 GitHub Release 下载根地址，方便其他工具复用缓存
 
 ## 基本用法
 
@@ -106,8 +107,10 @@ steps:
 
 - `latest` 和 `latest-prerelease` 是移动 tag，不会缓存
 - 固定 tag 可以缓存
-- 如果提供 `checksum`，cache key 使用 checksum
-- 如果不提供 `checksum`，cache key 使用 GitHub asset metadata：`asset.id`、`asset.name`、`asset.size`、`asset.updated_at`
+- cache key 格式为 `gh-release/v1/<owner>/<repo>/<tag>/<platform>-<arch>/<fingerprint>`
+- cache fingerprint 包含 GitHub asset metadata：`asset.id`、`asset.name`、`asset.size`、`asset.updated_at`
+- 如果提供 `checksum`，cache fingerprint 也会包含 checksum
+- cache 内容使用 `asset/`、`bin/`、`release/` 和 `metadata.json` 布局
 - cache hit 后会校验缓存 metadata 是否仍匹配当前选中的 release asset
 
 ## SHA256 校验
@@ -166,20 +169,21 @@ checksum: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 | `release-tag` | 解析后的 release tag |
 | `asset-name` | 选中的 release asset 名称 |
 | `install-dir` | 安装目录 |
+| `asset-path` | 缓存中的原始 release asset 路径 |
 | `bin-dir` | 第一个已加入 `PATH` 的目录 |
 | `binary-path` | 第一个最终安装的 binary 路径 |
 | `bin-dirs` | JSON 数组，包含所有已加入 `PATH` 的目录 |
 | `binary-paths` | JSON 数组，包含所有最终安装的 binary 路径 |
 | `checksum` | 下载 asset 的实际 SHA256 |
 | `cache-hit` | 是否命中缓存，值为 `true` 或 `false` |
-| `release-download-url` | 本地 `file://` Release 下载根地址。仅裸二进制 asset 且单个 binary 时输出 |
+| `release-download-url` | 本地 `file://` Release 下载根地址 |
 
 ## 本地 Release 下载地址
 
-对于裸二进制 asset，Action 会在安装目录中创建一个 GitHub Release 下载布局，并输出 `release-download-url`：
+Action 会在安装目录中创建一个 GitHub Release 下载布局，并输出 `release-download-url`：
 
 ```text
-<install-dir>/.release-download/<release-tag>/<asset-name>
+<install-dir>/release/<release-tag>/<asset-name>
 ```
 
 这个输出适合传给支持覆盖 GitHub Release 下载根地址的工具。例如 `appleboy/ssh-action` 会把 `DRONE_SSH_RELEASE_URL` 拼成：
@@ -204,7 +208,21 @@ ${DRONE_SSH_RELEASE_URL}/v1.8.2/drone-ssh-1.8.2-linux-amd64
     DRONE_SSH_RELEASE_URL: ${{ steps.drone-ssh.outputs.release-download-url }}
 ```
 
-布局文件优先使用 hardlink，失败时使用 symlink，不复制文件内容。archive asset 默认不输出该地址。
+缓存目录结构如下：
+
+```text
+<install-dir>/
+  asset/
+    <asset-name>
+  bin/
+    <installed-binaries>
+  release/
+    <release-tag>/
+      <asset-name>
+  metadata.json
+```
+
+`release/<release-tag>/<asset-name>` 优先 hardlink 到 `asset/<asset-name>`，失败时使用 symlink，不复制文件内容。裸二进制 asset 安装到 `bin/` 时优先 hardlink，失败后依次使用 symlink 和 copy，并会在日志中输出实际模式。
 
 ## 完整示例：安装 UPX
 
