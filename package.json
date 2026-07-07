@@ -32,8 +32,7 @@
     "@actions/cache": "^6.1.0",
     "@actions/core": "^3.0.1",
     "@actions/tool-cache": "^4.0.0",
-    "@protobuf-ts/runtime": "2.11.1",
-    "supports-color": "^10.2.2"
+    "@protobuf-ts/runtime": "2.11.1"
   },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^29.0.3",

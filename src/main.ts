@@ -204,12 +204,8 @@ async function run(): Promise<void> {
 }
 
 async function loadActionsToolkit(): Promise<void> {
-  const [protobufRuntime, supportsColor] = await Promise.all([
-    import("@protobuf-ts/runtime"),
-    import("supports-color"),
-  ]);
+  const protobufRuntime = await import("@protobuf-ts/runtime");
   requireMap.set("@protobuf-ts/runtime", protobufRuntime);
-  requireMap.set("supports-color", supportsColor.default);
 
   [cache, core, tc] = await Promise.all([
     import("@actions/cache"),

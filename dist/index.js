@@ -254,12 +254,8 @@ async function run() {
     }
 }
 async function loadActionsToolkit() {
-    const [protobufRuntime, supportsColor] = await Promise.all([
-        import('./chunks/protobuf-runtime.js').then(function (n) { return n.i; }),
-        import('./chunks/vendor.js').then(function (n) { return n.A; }),
-    ]);
+    const protobufRuntime = await import('./chunks/protobuf-runtime.js').then(function (n) { return n.i; });
     requireMap.set("@protobuf-ts/runtime", protobufRuntime);
-    requireMap.set("supports-color", supportsColor.default);
     [cache, core, tc] = await Promise.all([
         import('./chunks/actions-cache.js'),
         import('./chunks/actions-shared.js').then(function (n) { return n.k; }),
