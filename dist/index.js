@@ -243,15 +243,15 @@ async function run() {
 }
 async function loadActionsToolkit() {
     const [protobufRuntime, supportsColor] = await Promise.all([
-        import(/* webpackChunkName: "protobuf-runtime" */ './chunks/protobuf-runtime.js').then(function (n) { return n.i; }),
-        import(/* webpackChunkName: "supports-color" */ './chunks/vendor.js').then(function (n) { return n.C; }),
+        import('./chunks/protobuf-runtime.js').then(function (n) { return n.i; }),
+        import('./chunks/vendor.js').then(function (n) { return n.C; }),
     ]);
     requireMap.set("@protobuf-ts/runtime", protobufRuntime);
     requireMap.set("supports-color", supportsColor.default);
     [cache, core, tc] = await Promise.all([
-        import(/* webpackChunkName: "actions-cache" */ './chunks/actions-cache.js'),
-        import(/* webpackChunkName: "actions-core" */ './chunks/actions-core.js').then(function (n) { return n.k; }),
-        import(/* webpackChunkName: "actions-tool-cache" */ './chunks/actions-tool-cache.js'),
+        import('./chunks/actions-cache.js'),
+        import('./chunks/actions-shared.js').then(function (n) { return n.k; }),
+        import('./chunks/actions-tool-cache.js'),
     ]);
 }
 function getInputs() {
